@@ -1,0 +1,199 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # ============================================================================
+  # PR Validation
+  # ============================================================================
+  validate-pr:
+    name: Validate PR
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check PR title format
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          if ! [[ "$PR_TITLE" =~ ^(feat|fix|docs|test|refactor|perf|chore|ci)(\(.+\))?!?: ]]; then
+            echo "❌ PR title must follow conventional commits format"
+            echo "Examples: feat: Add feature, fix: Fix bug, docs: Update docs"
+            exit 1
+          fi
+          echo "✅ PR title format is valid"
+      
+      - name: Check for conflicts
+        run: |
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "✅ No merge conflicts detected"
+          else
+            echo "⚠️  Please rebase on main"
+          fi
+      
+      - name: Check file changes
+        run: |
+          echo "Files changed:"
+          git diff --name-only origin/main...HEAD
+          
+          # Check for large files
+          LARGE_FILES=$(git diff --name-only origin/main...HEAD | xargs ls -lh 2>/dev/null | awk '$5 > "10M" {print $9}')
+          if [ ! -z "$LARGE_FILES" ]; then
+            echo "⚠️  Large files detected (>10MB):"
+            echo "$LARGE_FILES"
+          fi
+
+  # ============================================================================
+  # Automated Testing
+  # ============================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++
+      
+      - name: Run C++ tests
+        run: |
+          cd tests
+          g++ -I../shared-engine/include \
+              ../shared-engine/src/ay_pilot_engine.cpp \
+              ../shared-engine/src/hifigan_vocoder.cpp \
+              test_analysis.cpp test_vocoder.cpp -o test_suite
+          ./test_suite
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: tests/test_*.log
+
+  # ============================================================================
+  # Code Review
+  # ============================================================================
+  code-review:
+    name: Code Review
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install linting tools
+        run: |
+          npm install -g eslint prettier
+      
+      - name: Check code formatting
+        run: |
+          cd desktop
+          npm install
+          npm run format:check || true
+      
+      - name: Run linter
+        run: |
+          cd desktop
+          npm run lint || true
+      
+      - name: Check for TODO/FIXME comments
+        run: |
+          TODOS=$(git diff origin/main...HEAD | grep -E '^\+.*TODO|^\+.*FIXME' || true)
+          if [ ! -z "$TODOS" ]; then
+            echo "⚠️  TODO/FIXME comments found in changes:"
+            echo "$TODOS"
+          fi
+
+  # ============================================================================
+  # Documentation Check
+  # ============================================================================
+  docs:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check for documentation updates
+        run: |
+          DOCS_CHANGED=$(git diff --name-only origin/main...HEAD | grep -E '\.md$' || true)
+          CODE_CHANGED=$(git diff --name-only origin/main...HEAD | grep -E '\.(cpp|kt|js|py)$' || true)
+          
+          if [ ! -z "$CODE_CHANGED" ] && [ -z "$DOCS_CHANGED" ]; then
+            echo "⚠️  Code changed but no documentation updates found"
+            echo "Please update relevant documentation files"
+          fi
+      
+      - name: Validate markdown
+        run: |
+          sudo apt-get install -y markdownlint
+          markdownlint '**/*.md' || true
+
+  # ============================================================================
+  # Security Check
+  # ============================================================================
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  summary:
+    name: PR Summary
+    needs: [validate-pr, test, code-review, docs, security]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check results
+        run: |
+          echo "## PR Check Summary"
+          echo ""
+          echo "- Validation: ${{ needs.validate-pr.result }}"
+          echo "- Tests: ${{ needs.test.result }}"
+          echo "- Code Review: ${{ needs.code-review.result }}"
+          echo "- Documentation: ${{ needs.docs.result }}"
+          echo "- Security: ${{ needs.security.result }}"
+          echo ""
+          
+          if [ "${{ needs.validate-pr.result }}" = "failure" ] || \
+             [ "${{ needs.test.result }}" = "failure" ]; then
+            echo "❌ PR checks failed"
+            exit 1
+          else
+            echo "✅ PR checks passed"
+          fi

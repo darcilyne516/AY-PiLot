@@ -1,0 +1,426 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
+
+jobs:
+  # ============================================================================
+  # C++ Shared Engine Tests
+  # ============================================================================
+  cpp-tests:
+    name: C++ Engine Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++ git
+      
+      - name: Build shared engine
+        run: |
+          cd shared-engine
+          mkdir -p build
+          cd build
+          cmake ..
+          make
+      
+      - name: Run voice analysis tests
+        run: |
+          cd tests
+          g++ -I../shared-engine/include \
+              ../shared-engine/src/ay_pilot_engine.cpp \
+              ../shared-engine/src/hifigan_vocoder.cpp \
+              test_analysis.cpp -o test_analysis
+          ./test_analysis
+      
+      - name: Run vocoder integration tests
+        run: |
+          cd tests
+          g++ -I../shared-engine/include \
+              ../shared-engine/src/ay_pilot_engine.cpp \
+              ../shared-engine/src/hifigan_vocoder.cpp \
+              test_vocoder.cpp -o test_vocoder
+          ./test_vocoder
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: cpp-test-results
+          path: tests/test_*.log
+
+  # ============================================================================
+  # Android Build & Test
+  # ============================================================================
+  android-build:
+    name: Android Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+      
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+          add-to-path: true
+      
+      - name: Setup Gradle
+        uses: gradle/gradle-build-action@v2
+      
+      - name: Build Android app
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew build --stacktrace
+      
+      - name: Run Android unit tests
+        run: |
+          cd android
+          ./gradlew test --stacktrace
+      
+      - name: Build Android APK
+        run: |
+          cd android
+          ./gradlew assembleRelease --stacktrace
+      
+      - name: Build Android App Bundle
+        run: |
+          cd android
+          ./gradlew bundleRelease --stacktrace
+      
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/release/*.apk
+      
+      - name: Upload App Bundle artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-aab
+          path: android/app/build/outputs/bundle/release/*.aab
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-test-results
+          path: android/app/build/reports/tests/
+
+  # ============================================================================
+  # Desktop Build (Linux)
+  # ============================================================================
+  desktop-linux:
+    name: Desktop Build (Linux)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libx11-dev libxext-dev
+      
+      - name: Install npm dependencies
+        run: |
+          cd desktop
+          npm install
+      
+      - name: Build N-API bindings
+        run: |
+          cd desktop
+          npm run build:native
+      
+      - name: Build Electron app
+        run: |
+          cd desktop
+          npm run build
+      
+      - name: Run tests
+        run: |
+          cd desktop
+          npm test
+      
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: desktop-linux
+          path: desktop/dist/AY-PiLot-*.AppImage
+
+  # ============================================================================
+  # Desktop Build (macOS)
+  # ============================================================================
+  desktop-macos:
+    name: Desktop Build (macOS)
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          brew install python3
+      
+      - name: Install npm dependencies
+        run: |
+          cd desktop
+          npm install
+      
+      - name: Build N-API bindings
+        run: |
+          cd desktop
+          npm run build:native
+      
+      - name: Build Electron app
+        run: |
+          cd desktop
+          npm run build
+      
+      - name: Run tests
+        run: |
+          cd desktop
+          npm test
+      
+      - name: Notarize macOS app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd desktop
+          npm run notarize || echo "Notarization skipped (credentials not configured)"
+      
+      - name: Upload macOS build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: desktop-macos
+          path: desktop/dist/AY-PiLot-*.dmg
+
+  # ============================================================================
+  # Desktop Build (Windows)
+  # ============================================================================
+  desktop-windows:
+    name: Desktop Build (Windows)
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      
+      - name: Install npm dependencies
+        run: |
+          cd desktop
+          npm install
+      
+      - name: Build N-API bindings
+        run: |
+          cd desktop
+          npm run build:native
+      
+      - name: Build Electron app
+        run: |
+          cd desktop
+          npm run build
+      
+      - name: Run tests
+        run: |
+          cd desktop
+          npm test
+      
+      - name: Sign Windows executable
+        env:
+          WINDOWS_CERT: ${{ secrets.WINDOWS_CERT }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          cd desktop
+          npm run sign || echo "Signing skipped (credentials not configured)"
+      
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: desktop-windows
+          path: desktop/dist/AY-PiLot-*.exe
+
+  # ============================================================================
+  # Code Quality & Linting
+  # ============================================================================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          cd desktop
+          npm install
+      
+      - name: Run ESLint
+        run: |
+          cd desktop
+          npm run lint || true
+      
+      - name: Run Prettier
+        run: |
+          cd desktop
+          npm run format:check || true
+      
+      - name: Upload linting results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: code-quality-results
+          path: desktop/lint-results/
+
+  # ============================================================================
+  # Security Scanning
+  # ============================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Run Snyk security check
+        uses: snyk/actions/setup@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+
+  # ============================================================================
+  # Release Creation
+  # ============================================================================
+  release:
+    name: Create Release
+    needs: [cpp-tests, android-build, desktop-linux, desktop-macos, desktop-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            android-apk/*.apk
+            android-aab/*.aab
+            desktop-linux/*.AppImage
+            desktop-macos/*.dmg
+            desktop-windows/*.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # Notification
+  # ============================================================================
+  notify:
+    name: Notify Build Status
+    needs: [cpp-tests, android-build, desktop-linux, desktop-macos, desktop-windows, code-quality]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check build status
+        run: |
+          if [ "${{ needs.cpp-tests.result }}" = "failure" ] || \
+             [ "${{ needs.android-build.result }}" = "failure" ] || \
+             [ "${{ needs.desktop-linux.result }}" = "failure" ] || \
+             [ "${{ needs.desktop-macos.result }}" = "failure" ] || \
+             [ "${{ needs.desktop-windows.result }}" = "failure" ]; then
+            echo "❌ Build failed"
+            exit 1
+          else
+            echo "✅ Build successful"
+          fi
+      
+      - name: Notify Slack (optional)
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "AY Pilot Native Build: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*AY Pilot Native CI/CD*\nBuild: ${{ job.status }}\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

@@ -1,0 +1,209 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # Run every night at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  # ============================================================================
+  # Comprehensive Nightly Build
+  # ============================================================================
+  nightly-build:
+    name: Nightly Build & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++ python3 python3-pip
+      
+      - name: Build shared engine
+        run: |
+          cd shared-engine
+          mkdir -p build
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc)
+      
+      - name: Run comprehensive tests
+        run: |
+          cd tests
+          g++ -O2 -I../shared-engine/include \
+              ../shared-engine/src/ay_pilot_engine.cpp \
+              ../shared-engine/src/hifigan_vocoder.cpp \
+              test_analysis.cpp test_vocoder.cpp -o test_suite
+          ./test_suite
+      
+      - name: Run memory leak detection
+        run: |
+          sudo apt-get install -y valgrind
+          cd tests
+          valgrind --leak-check=full --show-leak-kinds=all ./test_suite 2>&1 | tee valgrind-report.txt
+      
+      - name: Run performance benchmarks
+        run: |
+          cd tests
+          g++ -O3 -I../shared-engine/include \
+              ../shared-engine/src/ay_pilot_engine.cpp \
+              ../shared-engine/src/hifigan_vocoder.cpp \
+              test_analysis.cpp test_vocoder.cpp -o benchmark
+          time ./benchmark
+      
+      - name: Upload nightly build results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: nightly-build-results
+          path: |
+            tests/valgrind-report.txt
+            tests/benchmark-results.txt
+
+  # ============================================================================
+  # Android Nightly Build
+  # ============================================================================
+  android-nightly:
+    name: Android Nightly Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+      
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+      
+      - name: Build Android with debug symbols
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+      
+      - name: Run Android instrumented tests
+        run: |
+          cd android
+          ./gradlew connectedAndroidTest --stacktrace || true
+      
+      - name: Generate Android test report
+        if: always()
+        run: |
+          cd android
+          ./gradlew testReport || true
+      
+      - name: Upload Android nightly build
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-nightly-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+
+  # ============================================================================
+  # Desktop Nightly Build
+  # ============================================================================
+  desktop-nightly:
+    name: Desktop Nightly Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libx11-dev libxext-dev
+      
+      - name: Install npm dependencies
+        run: |
+          cd desktop
+          npm install
+      
+      - name: Build with debug mode
+        run: |
+          cd desktop
+          npm run build:debug || npm run build
+      
+      - name: Run comprehensive tests
+        run: |
+          cd desktop
+          npm test -- --coverage
+      
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./desktop/coverage/coverage-final.json
+          flags: desktop
+          name: desktop-coverage
+      
+      - name: Upload Desktop nightly build
+        uses: actions/upload-artifact@v3
+        with:
+          name: desktop-nightly-linux
+          path: desktop/dist/AY-PiLot-*.AppImage
+
+  # ============================================================================
+  # Dependency Update Check
+  # ============================================================================
+  dependency-check:
+    name: Dependency Update Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Check for outdated npm packages
+        run: |
+          cd desktop
+          npm outdated || true
+      
+      - name: Check for security vulnerabilities
+        run: |
+          cd desktop
+          npm audit --audit-level=moderate || true
+      
+      - name: Check Android dependencies
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew dependencyUpdates || true
+
+  # ============================================================================
+  # Nightly Notification
+  # ============================================================================
+  notify:
+    name: Nightly Build Notification
+    needs: [nightly-build, android-nightly, desktop-nightly, dependency-check]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Send notification
+        run: |
+          echo "Nightly Build Results:"
+          echo "- C++ Build: ${{ needs.nightly-build.result }}"
+          echo "- Android Build: ${{ needs.android-nightly.result }}"
+          echo "- Desktop Build: ${{ needs.desktop-nightly.result }}"
+          echo "- Dependency Check: ${{ needs.dependency-check.result }}"
